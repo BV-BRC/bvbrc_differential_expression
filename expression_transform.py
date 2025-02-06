@@ -226,69 +226,90 @@ def create_experiment_file(output_path, mapping_dict, sample_dict, expression_di
 #{"sample":[{"sig_log_ratio":2675,"expmean":"1.258","sampleUserGivenId":"LB_stat_AerobicM9_stat_aerobic","expname":"LB_stat_AerobicM9_stat_aerobic","pid":"8f2e7338-9f04-4ba5-9fe2-5365c857d57fS0","genes":4429,"sig_z_score":139,"expstddev":"1.483"}]}
 
 def create_comparison_files(output_path, comparisons_table, mfile, form_data, experiment_id, sig_z, sig_log):
-    #create dicts for json
-    sample_dict={'sample':[]}
-    expression_dict={'expression':[]}
-    #create stats table for sample.json
-    grouped=comparisons_table.groupby(["sampleUserGivenId"], sort=False)
-    sample_stats=grouped.agg([np.mean, np.std])['log_ratio']
-    sample_stats=sample_stats.rename(columns={'mean':'expmean','std':'expstddev'})
-    sample_stats["genes"]=grouped.count()["exp_locus_tag"]
-    sample_stats["pid"]=[str(experiment_id)+"S"+str(i) for i in range(0,len(sample_stats))]
-    sample_stats["sampleUserGivenId"]=sample_stats.index
-    sample_stats["expname"]=sample_stats.index
-    #get zscore and significance columns
-    comparisons_table["z_score"]=grouped.transform(stats.zscore)["log_ratio"]
-    comparisons_table["sig_z"]=comparisons_table["z_score"].abs() >= sig_z
-    comparisons_table["sig_log"]=comparisons_table["log_ratio"].abs() >= sig_log
-    #store counts in stats
-    z_score_breakdown=comparisons_table.groupby(["sampleUserGivenId","sig_z"], sort=False).count()['z_score'].unstack()
-    if True in z_score_breakdown:
-        sample_stats["sig_z_score"]=z_score_breakdown[True]
-    else:
-        z_score_breakdown.columns=[True]
-        z_score_breakdown[True]=z_score_breakdown[True].apply(lambda x: 0)
-        sample_stats["sig_z_score"]=z_score_breakdown[True]
+    # Ensure log_ratio column contains numeric data and filter out non-numeric values
+    comparisons_table["log_ratio"] = pd.to_numeric(comparisons_table["log_ratio"], errors='coerce')
 
-    log_breakdown=comparisons_table.groupby(["sampleUserGivenId","sig_log"], sort=False).count()['log_ratio'].unstack()
-    if True in log_breakdown:
-        sample_stats["sig_log_ratio"]=log_breakdown[True]
-    else:
-        log_breakdown.columns=[True]
-        log_breakdown[True]=log_breakdown[True].apply(lambda x: 0)
-        sample_stats["sig_log_ratio"]=log_breakdown[True]
-    sample_stats["sig_log_ratio"]=sample_stats["sig_log_ratio"].fillna(0).astype('int64')
-    sample_stats["sig_z_score"]=sample_stats["sig_z_score"].fillna(0).astype('int64')
-    #set pid's for expression.json
+    # Drop rows with missing or non-numeric log_ratio values
+    comparisons_table = comparisons_table.dropna(subset=["log_ratio"])
+
+    # Ensure essential columns do not contain missing values
+    comparisons_table = comparisons_table.dropna(subset=['sampleUserGivenId', 'exp_locus_tag'])
+
+    # Create dicts for JSON
+    sample_dict = {'sample': []}
+    expression_dict = {'expression': []}
+
+    # Create stats table for sample.json
+    grouped = comparisons_table.groupby(["sampleUserGivenId"], sort=False)
+
+    # Log the grouped DataFrame to check its structure
+    sys.stdout.write("Grouped DataFrame structure:\n")
+    sys.stdout.write(grouped.head(3).to_string(index=False) + "\n")
+
+    # Perform aggregation with logging to isolate the issue
+    try:
+        sample_stats = grouped['log_ratio'].agg([np.mean, np.std])
+        sample_stats = sample_stats.rename(columns={'mean': 'expmean', 'std': 'expstddev'})
+        sys.stdout.write("Aggregation successful.\n")
+    except Exception as e:
+        sys.stderr.write(f"Error during aggregation: {e}\n")
+        sys.stdout.write("Grouped data:\n")
+        sys.stdout.write(grouped.head(3).to_string(index=False) + "\n")
+        raise e
+
+    sample_stats["genes"] = grouped['exp_locus_tag'].count()
+    sample_stats["pid"] = [str(experiment_id) + "S" + str(i) for i in range(len(sample_stats))]
+    sample_stats["sampleUserGivenId"] = sample_stats.index
+    sample_stats["expname"] = sample_stats.index
+
+    # Get z-score and significance columns
+    comparisons_table["z_score"] = grouped['log_ratio'].transform(stats.zscore)
+    comparisons_table["sig_z"] = comparisons_table["z_score"].abs() >= sig_z
+    comparisons_table["sig_log"] = comparisons_table["log_ratio"].abs() >= sig_log
+
+    # Store counts in stats
+    z_score_breakdown = comparisons_table.groupby(["sampleUserGivenId", "sig_z"], sort=False)['z_score'].count().unstack()
+    sample_stats["sig_z_score"] = z_score_breakdown.get(True, 0)
+
+    log_breakdown = comparisons_table.groupby(["sampleUserGivenId", "sig_log"], sort=False)['log_ratio'].count().unstack()
+    sample_stats["sig_log_ratio"] = log_breakdown.get(True, 0)
+
+    sample_stats["sig_log_ratio"] = sample_stats["sig_log_ratio"].fillna(0).astype('int64')
+    sample_stats["sig_z_score"] = sample_stats["sig_z_score"].fillna(0).astype('int64')
+
+    # Set pid's for expression.json
     sample_stats = sample_stats.reset_index(drop=True)
-    comparisons_table=comparisons_table.merge(sample_stats[["pid","sampleUserGivenId"]], how="left", on="sampleUserGivenId")
-    #pull in metadata spreadsheet if provided
+    comparisons_table = comparisons_table.merge(sample_stats[["pid", "sampleUserGivenId"]], how="left", on="sampleUserGivenId")
+
+    # Pull in metadata spreadsheet if provided
     if mfile and mfile.strip():
         sys.stdout.write("reading metadata template\n")
-        target_setup, meta_table=process_table(mfile, "mfile", die=True)
+        target_setup, meta_table = process_table(mfile, "mfile", die=True)
         try:
-            meta_key="sampleUserGivenId"
-            to_add=meta_table.columns-sample_stats.columns
-            meta_table=meta_table.set_index('sampleUserGivenId')
+            meta_key = "sampleUserGivenId"
+            to_add = meta_table.columns.difference(sample_stats.columns)
+            meta_table = meta_table.set_index('sampleUserGivenId')
             sample_stats.update(meta_table)
-            sample_stats=sample_stats.merge(meta_table[to_add], left_index=True, right_index=True, how='left')
-        except:
-            sys.stderr.write("failed to parse user provide metadata template\n")
+            sample_stats = sample_stats.merge(meta_table[to_add], left_index=True, right_index=True, how='left')
+        except Exception as e:
+            sys.stderr.write("failed to parse user provided metadata template\n")
             sys.exit(2)
-    #populate json dicts
-    sample_stats=sample_stats.fillna("")
-    sample_dict['sample']=json.loads(sample_stats.to_json(orient='records', date_format='iso'))
-    #sample_dict['sample']=sample_stats.to_dict(outtype='records')
+
+    # Populate JSON dicts
+    sample_stats = sample_stats.fillna("")
+    sample_dict['sample'] = json.loads(sample_stats.to_json(orient='records', date_format='iso'))
+
     cols = [col for col in comparisons_table.columns if col not in ['sig_z', 'sig_log']]
-    expression_dict['expression']=json.loads(comparisons_table[cols].to_json(orient='records'))
-    output_file=os.path.join(output_path, 'sample.json')
-    out_handle=open(output_file, 'w')
-    json.dump(sample_dict, out_handle)
-    out_handle.close()
-    output_file=os.path.join(output_path, 'expression.json')
-    out_handle=open(output_file, 'w')
-    json.dump(expression_dict, out_handle)
-    out_handle.close()
+    expression_dict['expression'] = json.loads(comparisons_table[cols].to_json(orient='records'))
+
+    output_file = os.path.join(output_path, 'sample.json')
+    with open(output_file, 'w') as out_handle:
+        json.dump(sample_dict, out_handle)
+
+    output_file = os.path.join(output_path, 'expression.json')
+    with open(output_file, 'w') as out_handle:
+        json.dump(expression_dict, out_handle)
+
     return (sample_dict, expression_dict)
     
     
