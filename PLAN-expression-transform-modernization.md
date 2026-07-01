@@ -180,6 +180,43 @@ test file only if changed), directly to `master`, left unpushed. Leave the untra
 scratch files (`bug.json`, `ustr.*`, `sstr.*`, `diffexp-mapping-analysis.slack.md`)
 out of the commit.
 
+## Optional: client-side (GUI) mapping preview
+
+Separate, GUI-side work (does not replace the Python fixes above). Feasibility:
+every step of `expression_transform.py` has a browser equivalent, and the two
+network-bound pieces are naturally browser-friendly — the GUI is served from
+`www.bv-brc.org` and the data API is at `www.bv-brc.org/api` (**same origin, no
+CORS**), and the browser already holds the user's auth token. Recommended shape
+is a **hybrid**: do file parsing + a gene-mapping *preview* client-side for
+instant feedback, while the full transform + output JSONs + Solr indexing stay
+on a backend path (or move fully client-side only if input sizes are bounded —
+the app spec's `default_memory: 100G` is a caution flag, likely over-provisioned).
+
+The chief win: the preview surfaces "N of M gene IDs mapped in genome X" **before
+submit**, catching exactly the `bug.json` failure (wrong `genome_id` → 0 mapped)
+at genome-selection time instead of as a failed job.
+
+Two hand-off sketches accompany this plan (framework-agnostic ES modules):
+
+- `expression-mapping-preview.sketch.js` — `mapGeneIds(geneIds, {dataApi,
+  sourceIdType, genomeId, host, token})`, the `fetch` equivalent of
+  `make_map_query`+`place_ids`. Bakes in the Part B fixes: **no hard
+  `annotation:PATRIC` filter** (requests `annotation` and prefers PATRIC else
+  RefSeq on collisions, so RefSeq-only `b####` tags resolve), Solr value quoting,
+  chunking at 1000, `--host` identity mapping, and returns
+  `{total, mapped, unmapped, unmappedList, idMap}` instead of hard-exiting.
+- `expression-file-parse.sketch.js` — `parseExpressionFile(file)`, the
+  `process_table`+`fix_headers`+`gene_matrix_to_list` equivalent: PapaParse
+  (csv/tsv) / SheetJS (xls/xlsx) → header normalization → gene_list vs
+  gene_matrix detection → melt to canonical long form
+  `{exp_locus_tag, sampleUserGivenId, log_ratio}` with clamp/drop; returns
+  `{setup, rows, geneIds}` to feed straight into `mapGeneIds`.
+
+Caveats for the GUI team: confirm the `genome_feature` schema returns
+`annotation` per doc and that multi-valued source fields may arrive as arrays
+(handled in the sketch); the sketches cover **parse + mapping preview only** —
+per-sample stats, the four output JSONs, and indexing are not included.
+
 ## Out of scope
 - Upstream organism→genome_id selection (web UI/service) that picked the wrong
   `genome_id` — the script-side robustness above mitigates it, but the real fix is
